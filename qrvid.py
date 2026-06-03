@@ -363,6 +363,12 @@ def cmd_enc(args):
     max_mod = max(make_qr_image(b'\0' * HEADER_SIZE, box).shape[:2])
     print(f"Max QR dimension: {max_mod}px")
 
+    frames_needed = (total_chunks + qpf - 1) // qpf
+    vid_frames = max(YT_MIN_SECONDS * args.fps,
+                     frames_needed * args.hold + frames_needed * args.gap)
+    vid_dur = vid_frames / args.fps
+    print(f"Video: {vid_frames} frames, {vid_dur:.1f}s @ {args.fps} FPS")
+
     workers = args.workers if args.workers is not None else max(1, multiprocessing.cpu_count() - 1)
 
     if args.max_duration:
