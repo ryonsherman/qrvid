@@ -9,4 +9,4 @@
 
 ## Low Priority
 
-- [ ] Use gzip level 9 instead of default 6 for max compression (#21)
+- [x] Use gzip level 9 instead of default 6 for max compression (#21)

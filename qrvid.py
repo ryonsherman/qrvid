@@ -347,7 +347,7 @@ def cmd_enc(args):
     data_to_chunk = data
     if args.compress:
         import gzip
-        data_to_chunk = gzip.compress(data_to_chunk)
+        data_to_chunk = gzip.compress(data_to_chunk, compresslevel=9)
         flags |= COMPRESSED_FLAG
         ratio = len(data_to_chunk) * 100 // len(data)
         print(f"Compressed: {len(data)} → {len(data_to_chunk)} bytes ({ratio}%)")
