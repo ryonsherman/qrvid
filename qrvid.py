@@ -191,6 +191,16 @@ def fmt_dur(secs):
     return f"{s}s"
 
 
+def fmt_size(n):
+    if n < 1024:
+        return f"{n}b"
+    if n < 1024 * 1024:
+        return f"{n // 1024}kb"
+    if n < 1024 * 1024 * 1024:
+        return f"{n / (1024 * 1024):.1f}mb"
+    return f"{n / (1024 * 1024 * 1024):.1f}gb"
+
+
 # ---------------------------------------------------------------------------
 # PAR2 recovery + audio helpers
 # ---------------------------------------------------------------------------
@@ -430,7 +440,7 @@ def encode_video(chunks, output_path, fps, hold, gap, box, cols, rows,
     total_frames += yt_pad
     est_s = total_frames / fps
     size = os.path.getsize(output_path)
-    print(f"  Saved: {output_path} ({size} bytes, {fmt_dur(est_s)})")
+    print(f"  Saved: {output_path} ({fmt_size(size)}, {fmt_dur(est_s)})")
 
 
 def max_chunks_per_video(qpf, hold, gap, fps, max_duration_sec):
@@ -465,9 +475,9 @@ def cmd_enc(args):
         data_to_chunk = gzip.compress(data_to_chunk, compresslevel=9)
         flags |= COMPRESSED_FLAG
         ratio = len(data_to_chunk) * 100 // len(data)
-        print(f"Compressed: {len(data)} → {len(data_to_chunk)} bytes ({ratio}%)")
+        print(f"Compressed: {fmt_size(len(data))} → {fmt_size(len(data_to_chunk))} ({ratio}%)")
     if args.password:
-        print(f"Encrypting {len(data_to_chunk)} bytes (PBKDF2 + AES-256-GCM)...")
+        print(f"Encrypting {fmt_size(len(data_to_chunk))} (PBKDF2 + AES-256-GCM)...")
         data_to_chunk = encrypt_data(data_to_chunk, args.password)
 
     full_crc = zlib.crc32(data)
@@ -480,7 +490,7 @@ def cmd_enc(args):
 
     total_chunks = (len(data_to_chunk) + data_per_chunk - 1) // data_per_chunk
 
-    print(f"Total data: {full_len} bytes {'(encrypted)' if args.password else ''}")
+    print(f"Total data: {fmt_size(full_len)} {'(encrypted)' if args.password else ''}")
     print(f"CRC32: {full_crc:08x}")
     print(f"Chunks: {total_chunks}, Layout: {cols}x{rows} ({qpf} QRs/frame)")
 
@@ -517,7 +527,7 @@ def cmd_enc(args):
                 segment = data_to_chunk[start:end]
                 part_chunks = build_chunks(segment, flags=flags)
                 out_path = part_path(args.output, pi + 1, nparts)
-                print(f"\nPart {pi + 1}/{nparts} ({len(segment)} bytes, "
+                print(f"\nPart {pi + 1}/{nparts} ({fmt_size(len(segment))}, "
                       f"{len(part_chunks)} chunks)")
                 encode_video(part_chunks, out_path, args.fps, args.hold,
                              args.gap, box, cols, rows, vw, vh,
@@ -540,7 +550,7 @@ def cmd_enc(args):
         if data_size > max_audio:
             print(f"  Warning: recovery data ({data_size // 1024}KB) exceeds audio capacity "
                   f"({max_audio // 1024}KB) — use fewer blocks or a longer video")
-        print(f"  Recovery audio: {len(mod_data)} bytes")
+        print(f"  Recovery audio: {fmt_size(len(mod_data))}")
         _add_audio_to_video(args.output, mod_data, args.output)
 
     if args.verify:
@@ -554,7 +564,7 @@ def cmd_enc(args):
                 v_data = gzip.decompress(v_data)
             v_crc = zlib.crc32(v_data)
             if v_crc == full_crc and len(v_data) == full_len:
-                print(f"  Verify OK ({len(v_data)} bytes, CRC: {v_crc:08x})")
+                print(f"  Verify OK ({fmt_size(len(v_data))}, CRC: {v_crc:08x})")
             else:
                 print(f"  Verify FAILED: CRC {v_crc:08x} (expected {full_crc:08x})")
         except RuntimeError as e:
@@ -756,7 +766,7 @@ def decode_video(video_path, workers=None):
             pos = ch['chunk_index'] * MAX_CHUNK_DATA
             reconstructed[pos:pos + len(ch['data'])] = ch['data']
         data = bytes(reconstructed[:total_data_len])
-        print(f"  Partial data: {len(data)} bytes")
+        print(f"  Partial data: {fmt_size(len(data))}")
         return data, flags, missing
 
     ordered = [chunks[i] for i in range(total)]
@@ -772,7 +782,7 @@ def decode_video(video_path, workers=None):
         raise RuntimeError(
             f"CRC32 mismatch: expected {expected_crc:08x}, got {actual_crc:08x}")
 
-    print(f"  Reconstructed: {len(data)} bytes (CRC32: {expected_crc:08x} ✓)")
+    print(f"  Reconstructed: {fmt_size(len(data))} (CRC32: {expected_crc:08x} ✓)")
     return data, flags, 0
 
 
@@ -816,19 +826,19 @@ def cmd_dec(args):
             os.unlink(tf)
 
     if par2_data:
-        print(f"Repairing with PAR2 ({len(par2_data)} bytes)...")
+        print(f"Repairing with PAR2 ({fmt_size(len(par2_data))})...")
         all_data = _repair_with_par2(all_data, par2_data)
 
     if args.password:
-        print(f"\nDecrypting ({len(all_data)} bytes)...")
+        print(f"\nDecrypting ({fmt_size(len(all_data))})...")
         all_data = decrypt_data(all_data, args.password)
 
     if data_flags & COMPRESSED_FLAG:
         import gzip
         all_data = gzip.decompress(all_data)
-        print(f"Decompressed: {len(all_data)} bytes")
+        print(f"Decompressed: {fmt_size(len(all_data))}")
 
-    print(f"\nReconstructed: {len(all_data)} bytes ✓")
+    print(f"\nReconstructed: {fmt_size(len(all_data))} ✓")
     if args.password:
         print("Decryption: OK (AES-256-GCM)")
 
