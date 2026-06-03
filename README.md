@@ -3,6 +3,8 @@
 Encode arbitrary binary data into QR code videos for YouTube storage, and
 decode it back from a downloaded video.
 
+![QR code video preview](preview.gif)
+
 ## How it works
 
 1. **Chunking** — input data is split into chunks (default 480 bytes each).
