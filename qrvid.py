@@ -315,7 +315,7 @@ def encode_video(chunks, output_path, fps, hold, gap, box, cols, rows,
     total_frames += yt_pad
     est_s = total_frames / fps
     size = os.path.getsize(output_path)
-    print(f"  Saved: {output_path} ({size} bytes, {est_s:.1f}s)")
+    print(f"  Saved: {output_path} ({size} bytes, {fmt_dur(est_s)})")
 
 
 def max_chunks_per_video(qpf, hold, gap, fps, max_duration_sec):
@@ -376,7 +376,7 @@ def cmd_enc(args):
     vid_frames = max(YT_MIN_SECONDS * args.fps,
                      frames_needed * args.hold + frames_needed * args.gap)
     vid_dur = vid_frames / args.fps
-    print(f"Video: {vid_frames} frames, {vid_dur:.1f}s @ {args.fps} FPS")
+    print(f"Video: {vid_frames} frames, {fmt_dur(vid_dur)} @ {args.fps} FPS")
 
     workers = args.workers if args.workers is not None else max(1, multiprocessing.cpu_count() - 1)
 
@@ -522,7 +522,7 @@ def decode_video(video_path, workers=None):
 
     dur = total_frames / fps
     print(f"\nVideo: {video_path}")
-    print(f"Video: {total_frames} frames, {dur:.1f}s @ {fps:.0f} FPS")
+    print(f"Video: {total_frames} frames, {fmt_dur(dur)} @ {fps:.0f} FPS")
 
     if workers is None:
         workers = max(1, multiprocessing.cpu_count() - 1)
