@@ -266,13 +266,18 @@ def _add_audio_to_video(video_path, audio_wav, output_path):
     tmp_out = tempfile.mktemp(suffix='.mp4')
     with open(tmp_wav, 'wb') as f:
         f.write(audio_wav)
-    subprocess.run(['ffmpeg', '-y', '-i', video_path, '-i', tmp_wav,
-                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k',
-                    '-map', '0:v:0', '-map', '1:a:0',
-                    '-shortest', tmp_out],
-                   capture_output=True, timeout=120)
+    r = subprocess.run(['ffmpeg', '-y', '-i', video_path, '-i', tmp_wav,
+                        '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k',
+                        '-map', '0:v:0', '-map', '1:a:0',
+                        '-shortest', tmp_out],
+                       capture_output=True, timeout=120)
     os.unlink(tmp_wav)
-    shutil.move(tmp_out, output_path)
+    if r.returncode == 0 and os.path.getsize(tmp_out) > 0:
+        os.unlink(video_path)
+        shutil.move(tmp_out, output_path)
+    else:
+        os.unlink(tmp_out)
+        print(f"  Warning: could not add audio track (ffmpeg exit {r.returncode})")
 
 
 def _extract_audio(video_path):
@@ -529,6 +534,12 @@ def cmd_enc(args):
         print(f"  Generating {args.recovery} PAR2 recovery blocks...")
         par2_data = _create_par2(data_to_chunk, args.recovery)
         mod_data = _modem_tx(par2_data, RECOVERY_BAUD)
+        vid_sec = vid_dur
+        max_audio = int(vid_sec * 1800 * 0.75)  # base64 bytes that fit in video duration
+        data_size = len(par2_data)
+        if data_size > max_audio:
+            print(f"  Warning: recovery data ({data_size // 1024}KB) exceeds audio capacity "
+                  f"({max_audio // 1024}KB) — use fewer blocks or a longer video")
         print(f"  Recovery audio: {len(mod_data)} bytes")
         _add_audio_to_video(args.output, mod_data, args.output)
 
