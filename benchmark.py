@@ -55,36 +55,12 @@ def bench_local(data_size, configs, tmp, extra_flags):
                      loss, f"{enc_t:.1f}s"))
     return rows
 
-def bench_youtube(url, tmp):
-    outfile = os.path.join(tmp, 'yt.mp4')
-    chk = outfile + '.qrvid_chk'
-    for p in [outfile, outfile + '.qrvid_frames', chk]:
-        if os.path.isfile(p): os.unlink(p)
-        if os.path.isdir(p): shutil.rmtree(p)
-
-    print(f"\n  Downloading {url}...")
-    t0 = time.time()
-    cmd = PY + ['dec', url, '-o', os.path.join(tmp, 'decoded.bin')]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    dl_dec_t = time.time() - t0
-    lines = r.stdout.strip().splitlines()
-    result = {}
-    for l in lines:
-        if 'Reconstructed:' in l and 'CRC32' in l:
-            parts = l.split()
-            result['size'] = parts[1]
-        if 'Missing' in l:
-            result['missing'] = l.split()[1]
-    result['time'] = f"{dl_dec_t:.1f}s"
-    result['ok'] = r.returncode == 0
-    return result
 
 def main():
     import argparse
     ap = argparse.ArgumentParser(description='QRVid benchmark')
     ap.add_argument('--size', type=int, default=1024*1024,
                     help='Test file size in bytes (default 1 MB)')
-    ap.add_argument('--youtube', help='YouTube URL to benchmark decode')
     ap.add_argument('--layouts', default='6x5,5x4,4x4,4x3,3x3,2x2',
                     help='Comma-separated grid layouts (default: all)')
     ap.add_argument('extra', nargs=argparse.REMAINDER,
@@ -97,14 +73,6 @@ def main():
     for spec in args.layouts.split(','):
         c, r = spec.split('x')
         configs.append({'cols': int(c), 'rows': int(r), 'label': spec})
-
-    if args.youtube:
-        print(f"YouTube decode benchmark: {args.youtube}")
-        r = bench_youtube(args.youtube, tmp)
-        status = "OK" if r.get('ok') else "FAIL"
-        print(f"  Result: {status}  |  Decode: {r.get('time', '?')}  |  "
-              f"Data: {r.get('size', '?')} bytes  |  "
-              f"Missing: {r.get('missing', '0')} chunks")
 
     if configs:
         data_size = args.size
@@ -120,6 +88,7 @@ def main():
                   f"{str(r[3]):>7}  {str(r[4]):>5}  {str(r[5]):>8}")
 
     shutil.rmtree(tmp)
+
 
 if __name__ == '__main__':
     main()

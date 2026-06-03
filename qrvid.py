@@ -441,18 +441,18 @@ def ensure_video_file(input_arg):
     if input_arg.startswith(('http://', 'https://', 'www.')):
         print(f"Downloading video from: {input_arg}")
         import yt_dlp
-        tmp = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
-        tmp.close()
+        tmp = tempfile.mktemp(suffix='.mp4')
         ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best',
-            'outtmpl': tmp.name,
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'merge_output_format': 'mp4',
+            'outtmpl': tmp,
             'quiet': True,
             'no_warnings': True,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([input_arg])
-        print(f"Downloaded to: {tmp.name}")
-        return tmp.name
+        print(f"Downloaded to: {tmp}")
+        return tmp
     return input_arg
 
 
