@@ -9,9 +9,9 @@ Single-file CLI tool: `qrvid.py` with `enc` / `dec` subcommands.
 
 ## Architecture — encoding pipeline
 
-1. Optional gzip compression (`--compress`)
+1. Optional gzip compression (`--compress`, level 9)
 2. Optional AES-256-GCM encryption (PBKDF2 key derivation, 600k iterations)
-3. `build_chunks(data, flags=0)` — splits into MAX_CHUNK_DATA (480) byte
+3. `build_chunks(data, flags=0)` — splits into MAX_CHUNK_DATA (300) byte
    chunks, each with a 20-byte header: `QRVD` magic, version (2), flags,
    total_chunks, chunk_index, chunk_len, total_len, CRC32
 4. Each chunk → QR code (qrcode library, EC H, auto version, border=2)
@@ -21,43 +21,62 @@ Single-file CLI tool: `qrvid.py` with `enc` / `dec` subcommands.
 7. Each layout held for N frames (`--hold 3`), white gap frames optional
 8. Video written as H.264 (`avc1`) via OpenCV VideoWriter
 9. YouTube minimum duration enforced with trailing black frames
-10. Optional **verify pass** (`--verify`): decodes the just-encoded video and
+10. Optional **PAR2 recovery** (`--recovery N`): generates N PAR2 recovery
+    blocks from the (compressed+encrypted) data, modulates them as FSK audio
+    at 14400 baud via minimodem, and embeds the audio track in the video
+11. Optional **verify pass** (`--verify`): decodes the just-encoded video and
     checks CRC to catch chunk loss immediately
-11. Optional **multi-part** (`--max-duration`): splits data across multiple
+12. Optional **multi-part** (`--max-duration`): splits data across multiple
     standalone `.partNN.mp4` videos
 
 ## Architecture — decoding pipeline
 
 1. Accepts YouTube URL(s), local file(s), glob, or directory via `nargs='+'`
-2. YouTube URLs downloaded with `yt-dlp` (temp files cleaned up on completion)
+2. YouTube URLs downloaded with `yt-dlp` (bun JS runtime + firefox cookies)
 3. Auto-discovers multi-part sibling files (`stem.part*.mp4`)
-4. Parallel frame scanning (ProcessPoolExecutor, `--workers` flag). Workers
+4. **Audio recovery**: extracts audio track, demodulates with minimodem to
+    recover PAR2 recovery blocks
+5. Parallel frame scanning (ProcessPoolExecutor, `--workers` flag). Workers
    seek to frame ranges and decode independently. Falls back to sequential
    with checkpoint resume for small videos.
-5. Skip frames where mean pixel value < 30 (black padding)
-6. Decode QRs from each frame (pyzbar preferred with stderr suppressed, then
+6. Skip frames where mean pixel value < 30 (black padding)
+7. Decode QRs from each frame (pyzbar preferred with stderr suppressed, then
    OpenCV fallback). zbar's Latin-1→UTF-8 inflation is reversed.
-7. Deduplicate by raw payload hash; parse header; collect chunks by index
-8. Reorder by index, concatenate, verify CRC32 per part
-9. Optionally decrypt (AES-256-GCM, MAC verified)
-10. Auto-decompress if header flags indicate gzip compression
+8. Deduplicate by raw payload hash; parse header; collect chunks by index
+9. **PAR2 repair**: if chunks are missing, recover with PAR2 blocks from audio
+10. Reorder by index, concatenate, verify CRC32 per part
+11. Optionally decrypt (AES-256-GCM, MAC verified)
+12. Auto-decompress if header flags indicate gzip compression
 
 ## Key decisions & gotchas
 
 ### Multi-QR grid layout (6×5 default)
 
 Each frame holds a `cols`×`rows` grid of QR codes, each centered in its cell.
-Default 6×5 gives 30 QRs/frame (~14.4 KB/frame at 480 B/chunk).
+Default 6×5 gives 30 QRs/frame (~9 KB/frame at 300 B/chunk).
 Total data scales linearly with grid size.
 
 5×4 (20 QRs/frame) recommended for reliability with dense data — modules are
 2.21 px vs 1.73 px, significantly better after H.264 compression.
+4×3 (12 QRs/frame, 4.0 px/module) is the most reliable tested layout,
+losing only 42/56213 chunks (0.075%) through YouTube re-encode.
 
 ### Performance
 
 With 10 cores and 9 workers:
 - Generate 1859 frames (18 MB, 5×4 layout): ~3m30s
 - Verify/decode same: ~56s (parallel) / ~3m30s (sequential)
+
+### PAR2 + audio recovery
+
+PAR2 recovery blocks are generated from the compressed+encrypted data blob
+and transmitted as FSK audio at 14400 baud via minimodem. The base64-encoded
+data is embedded as an AAC audio track (128k) in the video.
+
+- 7m48s video capacity: ~630KB of PAR2 data (15+ recovery blocks)
+- YT-minimum 33s video capacity: ~14KB (~1 partial block)
+- Recovery blocks are small enough to fit in longer videos
+- `par2 create -cN` generates N recovery blocks (each ~40KB for 17MB data)
 
 ### zbar / pyzbar on macOS
 
@@ -99,7 +118,7 @@ upgrade PyCryptodome, verify the default nonce length hasn't changed.
 QR codes are auto-scaled to fit their cell
 (`(vw // cols - 20, vh // rows - 20)`). With `--box-size 8` and the default
 6×5 grid, each QR is ~936 px after nearest-neighbor upscale from ~552 px
-fitting in a 320×216 cell. The default chunk size (480) keeps QR version ≤ 24,
+fitting in a 320×216 cell. The default chunk size (300) keeps QR version ≤ 19,
 which keeps modules large enough to survive H.264 compression.
 
 Max QR dimension printed during encoding gives a rough readability check. If
@@ -137,25 +156,32 @@ so the duplicate is silently ignored.
 - Maximum (unverified): 15 min / (verified): 12 h
 - `--max-duration` is clamped to these bounds automatically
 
+### yt-dlp JS challenge
+
+YouTube's bot detection requires JavaScript challenge solving. The script
+uses bun as the JS runtime via `--remote-components ejs:github`. Firefox
+cookies (`--cookies-from-browser firefox`) are used for authenticated access.
+
 ## Round-trip test
 
 ```bash
 dd if=/dev/urandom bs=1K count=50 of=/tmp/test.bin
-python qrvid.py enc /tmp/test.bin -o /tmp/test.mp4 --verify
+python qrvid.py enc /tmp/test.bin -o /tmp/test.mp4 --verify --compress
 python qrvid.py dec /tmp/test.mp4 -o /tmp/out.bin
 cmp /tmp/test.bin /tmp/out.bin && echo OK
 ```
 
 ## Test data
 
-`test_data.bin` — 5 KB of random bytes at the project root. Used for quick
-round-trip verification.
+- `testdata/file_example_MP4_1920_18MG.mp4` — 18 MB example video (free to use)
 
 ## Project files
 
-- `qrvid.py` — single-file CLI tool (~740 lines)
+- `qrvid.py` — single-file CLI tool (~900 lines)
 - `requirements.txt` — Python dependencies
 - `test_data.bin` — test payload
 - `benchmark.py` — grid layout benchmark script
+- `Brewfile` — Homebrew dependencies (zbar, ffmpeg, par2, minimodem)
+- `preview.gif` — animated preview of encoded QR grid
 - `README.md` — user-facing documentation
 - `CONTEXT.md` — this file (agent context)

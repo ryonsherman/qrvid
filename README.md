@@ -7,35 +7,48 @@ decode it back from a downloaded video.
 
 ## How it works
 
-1. **Chunking** — input data is split into chunks (default 480 bytes each).
-   Every chunk gets a 19-byte header (magic, version, total chunks, index,
-   chunk length, total data length, CRC32).
-2. **QR encoding** — each chunk is rendered as a QR code (error correction H /
-   30%). Multiple QRs are laid out on a 1920×1080 H.264 video frame (2 by
-   default). Each layout is held for N frames (default 3 @ 30 fps = 0.1 s).
-3. **Video assembly** — layouts are written sequentially with optional white
-   gap frames between them.
-4. **Decoding** — the video is scanned frame by frame. QRs are detected with
-   `pyzbar` (falling back to OpenCV's built-in detector). Duplicate payloads
-   are discarded by hash. Missing chunks are reported if any are not found.
-5. **Reconstruction** — chunks are re-ordered by index, data is concatenated,
-   and the CRC32 is verified.
+1. **Chunking** — input data is split into chunks (default 300 bytes each).
+   Every chunk gets a 20-byte header (magic, version, flags, total chunks,
+   index, chunk length, total data length, CRC32).
+2. **Optional compression** — gzip level 9 (`--compress`).
+3. **Optional encryption** — AES-256-GCM with PBKDF2 key derivation.
+4. **QR encoding** — each chunk is rendered as a QR code (error correction H /
+   30%). Multiple QRs are laid out on a 1920×1080 H.264 video frame in a
+   `cols`×`rows` grid (default 6×5 = 30 QRs/frame).
+5. **Parallel frame generation** — frames are rendered in parallel using a
+   process pool (`--workers`).
+6. **Optional PAR2 recovery** — recovery blocks are generated from the
+   (compressed+encrypted) data and transmitted as FSK audio in the video's
+   audio track using `minimodem` (`--recovery N`).
+7. **Video assembly** — layouts are written sequentially, each held for N
+   frames (default 3 @ 30 fps ≈ 0.1 s). YouTube minimum duration is enforced
+   with trailing black frames.
+8. **Decoding** — audio is extracted and demodulated for PAR2 recovery blocks.
+   The video is scanned in parallel; QRs are detected with `pyzbar` (falling
+   back to OpenCV). Duplicate payloads are discarded by hash.
+9. **PAR2 repair** — if chunks are missing, the audio-recovered PAR2 blocks
+   automatically repair them.
+10. **Reconstruction** — chunks are re-ordered by index, data is concatenated,
+    optionally decrypted, optionally decompressed, and CRC32 is verified.
 
 ## Requirements
 
 - Python 3.8+
 - [zbar](https://github.com/mchehab/zbar) shared library (for pyzbar)
+- [par2cmdline](https://github.com/Parchive/par2cmdline) (for PAR2 recovery)
+- [minimodem](https://github.com/kamalmostafa/minimodem) (for audio recovery channel)
+- ffmpeg (for audio merging)
 
 ### macOS (Homebrew)
 
 ```bash
-brew install zbar
+brew bundle
 ```
 
 ### Linux (apt)
 
 ```bash
-sudo apt install libzbar0
+sudo apt install libzbar0 par2 minimodem ffmpeg
 ```
 
 ### Windows
@@ -96,6 +109,7 @@ python qrvid.py dec myfile.mp4 > restored.bin
 | `--workers` | cpu−1 | Parallel workers for frame generation |
 | `--compress` | — | Gzip data before encoding |
 | `--verify` | — | Decode output after encoding to check integrity |
+| `--recovery` | 0 | Generate N PAR2 recovery blocks (transmitted via audio) |
 | `-p` / `--password` | — | Encrypt with this password |
 
 ## Benchmarking
