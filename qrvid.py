@@ -553,13 +553,16 @@ def decode_video(video_path, workers=None):
                   for i in range(start_frame, total_frames, chunk_size)]
         done_ranges = 0
         with ProcessPoolExecutor(max_workers=workers) as pool:
-            for result in pool.map(_decode_frame_range, ranges):
-                all_payloads.extend(result)
+            futures = {pool.submit(_decode_frame_range, r): r for r in ranges}
+            for fut in as_completed(futures):
+                all_payloads.extend(fut.result())
                 done_ranges += 1
                 pct = done_ranges * 100 // len(ranges)
                 elapsed = time.time() - t0
+                rate = done_ranges / elapsed if elapsed > 0 else 0
+                eta = (len(ranges) - done_ranges) / rate if rate > 0 else 0
                 print(f"  Progress: ~{pct}% ({len(all_payloads)} payloads)  "
-                      f"[{fmt_dur(elapsed)} elapsed]")
+                      f"[{fmt_dur(elapsed)} elapsed, ETA {fmt_dur(eta)}]")
     else:
         cap = cv2.VideoCapture(video_path)
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
