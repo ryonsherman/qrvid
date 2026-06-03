@@ -32,9 +32,10 @@ from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Random import get_random_bytes
 
 MAGIC = b'QRVD'
-FORMAT_VERSION = 1
-HEADER_FORMAT = '<4sBHHHII'
+FORMAT_VERSION = 2
+HEADER_FORMAT = '<4sBBHHHII'
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+COMPRESSED_FLAG = 1
 
 QR_MAX_PAYLOAD = 1273
 MAX_CHUNK_DATA = 480
@@ -70,7 +71,7 @@ def decrypt_data(encrypted, password):
     return cipher.decrypt_and_verify(ciphertext, tag)
 
 
-def build_chunks(data):
+def build_chunks(data, flags=0):
     total_len = len(data)
     crc = zlib.crc32(data)
     total_chunks = (total_len + MAX_CHUNK_DATA - 1) // MAX_CHUNK_DATA
@@ -81,6 +82,7 @@ def build_chunks(data):
             HEADER_FORMAT,
             MAGIC,
             FORMAT_VERSION,
+            flags,
             total_chunks,
             len(chunks),
             len(chunk_data),
@@ -108,7 +110,7 @@ def parse_header(payload):
     if len(payload) < HEADER_SIZE:
         return None
     fields = struct.unpack(HEADER_FORMAT, payload[:HEADER_SIZE])
-    magic, ver, total_chunks, idx, chunk_len, total_data_len, crc = fields
+    magic, ver, flags, total_chunks, idx, chunk_len, total_data_len, crc = fields
     if magic != MAGIC:
         return None
     chunk_data = payload[HEADER_SIZE:HEADER_SIZE + chunk_len]
@@ -116,6 +118,7 @@ def parse_header(payload):
         return None
     return {
         'version': ver,
+        'flags': flags,
         'total_chunks': total_chunks,
         'chunk_index': idx,
         'chunk_len': chunk_len,
@@ -340,11 +343,17 @@ def cmd_enc(args):
         with open(args.input, 'rb') as f:
             data = f.read()
 
+    flags = 0
+    data_to_chunk = data
+    if args.compress:
+        import gzip
+        data_to_chunk = gzip.compress(data_to_chunk)
+        flags |= COMPRESSED_FLAG
+        ratio = len(data_to_chunk) * 100 // len(data)
+        print(f"Compressed: {len(data)} → {len(data_to_chunk)} bytes ({ratio}%)")
     if args.password:
-        print(f"Encrypting {len(data)} bytes (PBKDF2 + AES-256-GCM)...")
-        data_to_chunk = encrypt_data(data, args.password)
-    else:
-        data_to_chunk = data
+        print(f"Encrypting {len(data_to_chunk)} bytes (PBKDF2 + AES-256-GCM)...")
+        data_to_chunk = encrypt_data(data_to_chunk, args.password)
 
     full_crc = zlib.crc32(data)
     full_len = len(data)
@@ -391,7 +400,7 @@ def cmd_enc(args):
                 start = pi * max_bytes
                 end = min(start + max_bytes, len(data_to_chunk))
                 segment = data_to_chunk[start:end]
-                part_chunks = build_chunks(segment)
+                part_chunks = build_chunks(segment, flags=flags)
                 out_path = part_path(args.output, pi + 1, nparts)
                 print(f"\nPart {pi + 1}/{nparts} ({len(segment)} bytes, "
                       f"{len(part_chunks)} chunks)")
@@ -402,16 +411,19 @@ def cmd_enc(args):
             return
         print(f"Fits within {args.max_duration} min — single file")
 
-    chunks = build_chunks(data_to_chunk)
+    chunks = build_chunks(data_to_chunk, flags=flags)
     encode_video(chunks, args.output, args.fps, args.hold, args.gap, box,
                  cols, rows, vw, vh, workers=workers)
 
     if args.verify:
         print(f"\n  Verifying {args.output}...")
         try:
-            v_data = decode_video(args.output, workers=workers)
+            v_data, v_flags = decode_video(args.output, workers=workers)
             if args.password:
                 v_data = decrypt_data(v_data, args.password)
+            if v_flags & COMPRESSED_FLAG:
+                import gzip
+                v_data = gzip.decompress(v_data)
             v_crc = zlib.crc32(v_data)
             if v_crc == full_crc and len(v_data) == full_len:
                 print(f"  Verify OK ({len(v_data)} bytes, CRC: {v_crc:08x})")
@@ -600,6 +612,7 @@ def decode_video(video_path, workers=None):
     total = sample['total_chunks']
     total_data_len = sample['total_data_len']
     expected_crc = sample['crc']
+    flags = sample.get('flags', 0)
 
     if len(chunks) != total:
         missing = sorted(set(range(total)) - set(chunks.keys()))
@@ -621,7 +634,7 @@ def decode_video(video_path, workers=None):
             f"CRC32 mismatch: expected {expected_crc:08x}, got {actual_crc:08x}")
 
     print(f"  Reconstructed: {len(data)} bytes (CRC32: {expected_crc:08x} ✓)")
-    return data
+    return data, flags
 
 
 def cmd_dec(args):
@@ -643,13 +656,15 @@ def cmd_dec(args):
     print(f"Files to decode: {len(files)}")
 
     all_data = b''
+    data_flags = 0
     workers = args.workers if args.workers is not None else max(1, multiprocessing.cpu_count() - 1)
 
     for fi, f in enumerate(files):
         if len(files) > 1:
             print(f"[{fi + 1}/{len(files)}]", end="")
-        segment = decode_video(f, workers=workers)
+        segment, seg_flags = decode_video(f, workers=workers)
         all_data += segment
+        data_flags |= seg_flags
 
     for tf in temp_files:
         if os.path.exists(tf):
@@ -658,6 +673,11 @@ def cmd_dec(args):
     if args.password:
         print(f"\nDecrypting ({len(all_data)} bytes)...")
         all_data = decrypt_data(all_data, args.password)
+
+    if data_flags & COMPRESSED_FLAG:
+        import gzip
+        all_data = gzip.decompress(all_data)
+        print(f"Decompressed: {len(all_data)} bytes")
 
     print(f"\nReconstructed: {len(all_data)} bytes ✓")
     if args.password:
@@ -704,6 +724,8 @@ def parse_args():
                           '(default: cpu_count - 1)')
     enc.add_argument('--verify', action='store_true',
                      help='Verify output by decoding after encode')
+    enc.add_argument('--compress', action='store_true',
+                     help='Gzip compress data before encoding')
     dec = sub.add_parser('dec', help='Decode QR video back to file')
     dec.add_argument('input', nargs='+',
                      help='Video file path(s), glob, directory, or YouTube URL(s)')
