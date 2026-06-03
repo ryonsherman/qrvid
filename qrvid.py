@@ -134,7 +134,15 @@ def decode_qr_from_frame(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     try:
         from pyzbar.pyzbar import decode as zbar_decode
-        results = zbar_decode(gray)
+        _err = os.dup(2)
+        _null = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(_null, 2)
+        os.close(_null)
+        try:
+            results = zbar_decode(gray)
+        finally:
+            os.dup2(_err, 2)
+            os.close(_err)
         if results:
             out = []
             for r in results:
@@ -392,6 +400,20 @@ def cmd_enc(args):
     encode_video(chunks, args.output, args.fps, args.hold, args.gap, box,
                  cols, rows, vw, vh, workers=workers)
 
+    if args.verify:
+        print(f"\n  Verifying {args.output}...")
+        try:
+            v_data = decode_video(args.output, workers=workers)
+            if args.password:
+                v_data = decrypt_data(v_data, args.password)
+            v_crc = zlib.crc32(v_data)
+            if v_crc == full_crc and len(v_data) == full_len:
+                print(f"  Verify OK ({len(v_data)} bytes, CRC: {v_crc:08x})")
+            else:
+                print(f"  Verify FAILED: CRC {v_crc:08x} (expected {full_crc:08x})")
+        except RuntimeError as e:
+            print(f"  Verify FAILED: {e}")
+
 
 # ---------------------------------------------------------------------------
 # COMMAND: dec
@@ -452,7 +474,25 @@ def resolve_video_files(input_arg):
     return [video_path], [video_path] if is_temp else []
 
 
-def decode_video(video_path):
+def _decode_frame_range(args):
+    video_path, start, end = args
+    cap = cv2.VideoCapture(video_path)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+    found = []
+    fi = start
+    while fi < end:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if not is_black_frame(frame):
+            for raw in decode_qr_from_frame(frame):
+                found.append(raw)
+        fi += 1
+    cap.release()
+    return found
+
+
+def decode_video(video_path, workers=None):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open video: {video_path}")
@@ -460,14 +500,17 @@ def decode_video(video_path):
     chunks = {}
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
 
     print(f"\nVideo: {video_path}")
     print(f"Frames: {total_frames}, FPS: {fps:.2f}")
 
+    if workers is None:
+        workers = max(1, multiprocessing.cpu_count() - 1)
+
     chk_path = video_path + '.qrvid_chk'
     start_frame = 0
     seen_payloads = set()
-    last_progress = 0
     if os.path.exists(chk_path):
         with open(chk_path) as _f:
             saved = json.load(_f)
@@ -480,44 +523,69 @@ def decode_video(video_path):
                     chunks[info['chunk_index']] = info
         if start_frame > 0:
             print(f"  Resuming from frame {start_frame} ({len(chunks)} chunks cached)...")
-            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
-    frame_idx = start_frame
-    new_chunks_in_window = 0
+    remaining = total_frames - start_frame
+    all_payloads = []
+    t0 = time.time()
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        if not is_black_frame(frame):
-            payloads = decode_qr_from_frame(frame)
-            for raw in payloads:
-                if raw not in seen_payloads:
-                    seen_payloads.add(raw)
-                    info = parse_header(raw)
-                    if info and info['chunk_index'] not in chunks:
-                        chunks[info['chunk_index']] = info
+    if workers > 1 and remaining > 100:
+        chunk_size = max(1, remaining // workers)
+        ranges = [(video_path, i, min(i + chunk_size, total_frames))
+                  for i in range(start_frame, total_frames, chunk_size)]
+        done_ranges = 0
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            for result in pool.map(_decode_frame_range, ranges):
+                all_payloads.extend(result)
+                done_ranges += 1
+                pct = done_ranges * 100 // len(ranges)
+                elapsed = time.time() - t0
+                print(f"  Progress: ~{pct}% ({len(all_payloads)} payloads)  "
+                      f"[{fmt_dur(elapsed)} elapsed]")
+    else:
+        cap = cv2.VideoCapture(video_path)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        frame_idx = start_frame
+        last_progress = 0
+        new_chunks_in_window = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if not is_black_frame(frame):
+                for raw in decode_qr_from_frame(frame):
+                    if raw not in seen_payloads:
+                        all_payloads.append(raw)
+                        seen_payloads.add(raw)
                         new_chunks_in_window += 1
+            frame_idx += 1
+            pct = frame_idx * 100 // total_frames if total_frames > 0 else 0
+            if pct >= last_progress + 10:
+                last_progress = pct
+                elapsed = time.time() - t0
+                rate = (frame_idx - start_frame) / elapsed if elapsed > 0 else 0
+                remaining_frames = total_frames - frame_idx
+                eta = remaining_frames / rate if rate > 0 else 0
+                print(f"  Progress: {pct}% ({len(all_payloads)} payloads)  "
+                      f"[{fmt_dur(elapsed)} elapsed, ETA {fmt_dur(eta)}]")
+            if new_chunks_in_window > 0 and frame_idx % 100 == 0:
+                with open(chk_path, 'w') as _f:
+                    json.dump({
+                        'frame_idx': frame_idx,
+                        'found': [p.hex() for p in seen_payloads],
+                    }, _f)
+                new_chunks_in_window = 0
+        cap.release()
+        if os.path.exists(chk_path):
+            os.unlink(chk_path)
 
-        frame_idx += 1
-        pct = frame_idx * 100 // total_frames if total_frames > 0 else 0
-        if pct >= last_progress + 10:
-            last_progress = pct
-            print(f"  Progress: {pct}% ({len(chunks)} chunks found)")
-
-        if new_chunks_in_window > 0 and frame_idx % 100 == 0:
-            with open(chk_path, 'w') as _f:
-                json.dump({
-                    'frame_idx': frame_idx,
-                    'found': [p.hex() for p in seen_payloads],
-                }, _f)
-            new_chunks_in_window = 0
-
-    cap.release()
-
-    if os.path.exists(chk_path):
-        os.unlink(chk_path)
+    parsed = set()
+    for raw in all_payloads:
+        if raw in parsed:
+            continue
+        parsed.add(raw)
+        info = parse_header(raw)
+        if info and info['chunk_index'] not in chunks:
+            chunks[info['chunk_index']] = info
 
     if not chunks:
         raise RuntimeError("No valid QR codes found in video")
@@ -569,10 +637,12 @@ def cmd_dec(args):
     print(f"Files to decode: {len(files)}")
 
     all_data = b''
+    workers = args.workers if args.workers is not None else max(1, multiprocessing.cpu_count() - 1)
+
     for fi, f in enumerate(files):
         if len(files) > 1:
             print(f"[{fi + 1}/{len(files)}]", end="")
-        segment = decode_video(f)
+        segment = decode_video(f, workers=workers)
         all_data += segment
 
     for tf in temp_files:
@@ -626,11 +696,15 @@ def parse_args():
     enc.add_argument('--workers', type=int, default=None,
                      help='Parallel workers for frame generation '
                           '(default: cpu_count - 1)')
+    enc.add_argument('--verify', action='store_true',
+                     help='Verify output by decoding after encode')
     dec = sub.add_parser('dec', help='Decode QR video back to file')
     dec.add_argument('input', nargs='+',
                      help='Video file path(s), glob, directory, or YouTube URL(s)')
     dec.add_argument('-o', '--output', help='Output file path (default: stdout)')
     dec.add_argument('-p', '--password', help='Password for decryption')
+    dec.add_argument('--workers', type=int, default=None,
+                     help='Parallel workers (default: cpu_count - 1)')
 
     return parser.parse_args()
 
