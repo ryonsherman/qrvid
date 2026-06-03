@@ -1,4 +1,5 @@
 *.mp4
+!testdata/file_example_MP4_1920_18MG.mp4
 *.mp4.qrvid_frames/
 *.mp4.qrvid_chk
 .qrvid_frames/
