@@ -1,3 +1,4 @@
+zfec>=1.6.0
 opencv-python>=4.5.0
 qrcode[pil]>=7.0
 pyzbar>=0.1.9

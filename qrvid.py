@@ -45,7 +45,7 @@ FORMAT_VERSION = 2
 HEADER_FORMAT = '<4sBBHHHII'
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 COMPRESSED_FLAG = 1
-PAR2_FLAG = 2
+RECOVERY_FLAG = 2
 
 QR_MAX_PAYLOAD = 1273
 MAX_CHUNK_DATA = 300
@@ -200,49 +200,57 @@ def fmt_size(n):
 
 
 # ---------------------------------------------------------------------------
-# PAR2 recovery helpers
+# XOR recovery helpers (group-based, works at chunk level)
 # ---------------------------------------------------------------------------
 
-def _create_par2(data, num_blocks):
-    tmpdir = tempfile.mkdtemp()
-    base = os.path.join(tmpdir, 'data')
-    with open(base, 'wb') as f:
-        f.write(data)
-    subprocess.run(['par2', 'create', '-c' + str(num_blocks), '-m512',
-                    'data', 'data'],
-                   capture_output=True, timeout=120, cwd=tmpdir)
-    parts = sorted(glob.glob(os.path.join(tmpdir, 'data.*')))
-    par2_bytes = b''
-    for p in parts:
-        with open(p, 'rb') as f:
-            par2_bytes += f.read()
-        os.unlink(p)
-    os.unlink(base)
-    os.rmdir(tmpdir)
-    return par2_bytes
+def _create_xor_parity(data, group_size):
+    data_len = len(data)
+    chunks = [data[i:i + MAX_CHUNK_DATA] for i in range(0, data_len, MAX_CHUNK_DATA)]
+    parity = []
+    for start in range(0, len(chunks), group_size):
+        group = chunks[start:start + group_size]
+        xor = bytearray(MAX_CHUNK_DATA)
+        for c in group:
+            for i in range(len(c)):
+                xor[i] ^= c[i]
+        parity.append(bytes(xor))
+    header = struct.pack('>I', group_size)
+    return header + b''.join(parity)
 
 
-def _repair_with_par2(data, par2_bytes):
-    tmpdir = tempfile.mkdtemp()
-    base = os.path.join(tmpdir, 'data')
-    with open(base, 'wb') as f:
-        f.write(data)
-    par2_path = base + '.par2'
-    with open(par2_path, 'wb') as f:
-        f.write(par2_bytes)
-    r = subprocess.run(['par2', 'repair', par2_path, base],
-                       capture_output=True, timeout=120, cwd=tmpdir)
-    os.unlink(par2_path)
-    if r.returncode == 0 and os.path.exists(base):
-        with open(base, 'rb') as f:
-            repaired = f.read()
-        os.unlink(base)
-        os.rmdir(tmpdir)
-        return repaired
-    if os.path.exists(base):
-        os.unlink(base)
-    os.rmdir(tmpdir)
-    return data  # repair not possible, return original
+def _repair_xor(data, data_len, rec_data, found_indices):
+    group_size = struct.unpack('>I', rec_data[:4])[0]
+    parity_data = rec_data[4:]
+    expected_chunks = (data_len + MAX_CHUNK_DATA - 1) // MAX_CHUNK_DATA
+    found_set = set(found_indices)
+    missing_chunks = [i for i in range(expected_chunks) if i not in found_set]
+
+    if not missing_chunks:
+        return data[:data_len]
+
+    result = bytearray(data[:data_len])
+    chunks = [result[i:i + MAX_CHUNK_DATA] for i in range(0, data_len, MAX_CHUNK_DATA)]
+
+    parity_idx = 0
+    for start in range(0, expected_chunks, group_size):
+        missing = [i for i in missing_chunks if start <= i < start + group_size]
+        if len(missing) == 1:
+            mi = missing[0]
+            xor = bytearray(MAX_CHUNK_DATA)
+            for i in range(start, min(start + group_size, expected_chunks)):
+                if i != mi and i in found_set:
+                    c_data = bytes(chunks[i])
+                    for j in range(len(c_data)):
+                        xor[j] ^= c_data[j]
+            p_start = parity_idx * MAX_CHUNK_DATA
+            p_data = parity_data[p_start:p_start + MAX_CHUNK_DATA]
+            for j in range(len(p_data)):
+                xor[j] ^= p_data[j]
+            chunk_start = mi * MAX_CHUNK_DATA
+            chunk_end = min(chunk_start + MAX_CHUNK_DATA, data_len)
+            result[chunk_start:chunk_end] = xor[:chunk_end - chunk_start]
+        parity_idx += 1
+    return bytes(result)
 
 
 # ---------------------------------------------------------------------------
@@ -479,11 +487,11 @@ def cmd_enc(args):
 
     chunks = build_chunks(data_to_chunk, flags=flags)
     if args.recovery:
-        print(f"  Generating {args.recovery} PAR2 recovery blocks...")
-        par2_data = _create_par2(data_to_chunk, args.recovery)
-        par2_chunks = build_chunks(par2_data, flags=flags | PAR2_FLAG)
-        chunks.extend(par2_chunks)
-        print(f"  Total: {len(chunks)} chunks ({len(data_to_chunk)} data + {len(par2_data)} recovery)")
+        group_size = max(1, args.recovery)
+        print(f"  Generating XOR parity (group size {group_size})...")
+        rec_data = _create_xor_parity(data_to_chunk, group_size)
+        rec_chunks = build_chunks(rec_data, flags=flags | RECOVERY_FLAG)
+        chunks.extend(rec_chunks)
 
     encode_video(chunks, args.output, args.fps, args.hold, args.gap, box,
                  cols, rows, vw, vh, workers=workers)
@@ -674,14 +682,14 @@ def decode_video(video_path, workers=None):
             os.unlink(chk_path)
 
     data_chunks = {}
-    par2_chunks = {}
+    rec_chunks = {}
     for raw in all_payloads:
         info = parse_header(raw)
         if not info:
             continue
-        if info['flags'] & PAR2_FLAG:
-            if info['chunk_index'] not in par2_chunks:
-                par2_chunks[info['chunk_index']] = info
+        if info['flags'] & RECOVERY_FLAG:
+            if info['chunk_index'] not in rec_chunks:
+                rec_chunks[info['chunk_index']] = info
         else:
             if info['chunk_index'] not in data_chunks:
                 data_chunks[info['chunk_index']] = info
@@ -697,29 +705,31 @@ def decode_video(video_path, workers=None):
 
     missing = max(0, total - len(data_chunks))
 
-    if missing > 0 and par2_chunks:
+    if missing > 0 and rec_chunks:
         print(f"  Found {len(data_chunks)}/{total} data chunks ({missing} missing, "
-              f"{len(par2_chunks)} recovery chunks)")
-        # Reconstruct partial data with gaps
+              f"{len(rec_chunks)} recovery chunks)")
         partial = bytearray(total_data_len)
         for ch in data_chunks.values():
             pos = ch['chunk_index'] * MAX_CHUNK_DATA
             partial[pos:pos + len(ch['data'])] = ch['data']
         partial = bytes(partial[:total_data_len])
 
-        # Reconstruct PAR2 data
-        par2_ordered = [par2_chunks[i] for i in sorted(par2_chunks)]
-        par2_data = b''.join(ch['data'] for ch in par2_ordered) if par2_ordered else b''
+        rec_ordered = [rec_chunks[i] for i in sorted(rec_chunks)]
+        rec_data = b''.join(ch['data'] for ch in rec_ordered) if rec_ordered else b''
 
-        if par2_data:
-            print(f"  Repairing with PAR2 ({fmt_size(len(par2_data))})...")
-            repaired = _repair_with_par2(partial, par2_data)
+        if rec_data:
+            print(f"  Repairing with XOR parity ({fmt_size(len(rec_data))})...")
+            repaired = _repair_xor(partial, total_data_len, rec_data, list(data_chunks.keys()))
             actual_crc = zlib.crc32(repaired)
             if actual_crc == expected_crc:
                 print(f"  Repair OK ({fmt_size(len(repaired))}, CRC: {expected_crc:08x} ✓)")
                 return repaired, flags, 0
+            actual_crc = zlib.crc32(repaired)
+            if actual_crc == expected_crc:
+                print(f"  Recovery OK ({fmt_size(len(repaired))}, CRC: {expected_crc:08x} ✓)")
+                return repaired, flags, 0
 
-        print(f"  Repair failed, returning partial data ({fmt_size(len(partial))})")
+        print(f"  Recovery failed, returning partial data ({fmt_size(len(partial))})")
         return partial, flags, missing
 
     if missing > 0:
