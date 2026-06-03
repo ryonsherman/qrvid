@@ -279,7 +279,7 @@ def _add_audio_to_video(video_path, audio_wav, output_path):
     r = subprocess.run(['ffmpeg', '-y', '-i', video_path, '-i', tmp_wav,
                         '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k',
                         '-map', '0:v:0', '-map', '1:a:0',
-                        '-shortest', tmp_out],
+                        '-async', '1', tmp_out],
                        capture_output=True, timeout=120)
     os.unlink(tmp_wav)
     if r.returncode == 0 and os.path.getsize(tmp_out) > 0:
