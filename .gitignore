@@ -1,0 +1,6 @@
+*.mp4
+*.mp4.qrvid_frames/
+*.mp4.qrvid_chk
+.qrvid_frames/
+__pycache__/
+*.pyc
