@@ -7,6 +7,10 @@
 
 # TODO
 
+## Medium Priority
+
+- [ ] Add PAR2 forward error correction, transmit recovery blocks via audio (minimodem FSK) (#22) [feature]
+
 ## Low Priority
 
 - [x] Use gzip level 9 instead of default 6 for max compression (#21)

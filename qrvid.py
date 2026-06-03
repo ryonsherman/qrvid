@@ -9,11 +9,20 @@ import tempfile
 import json
 import glob
 import re
+import subprocess
 
 _brew_lib = '/opt/homebrew/lib'
 if os.path.isdir(_brew_lib):
     os.environ.setdefault('DYLD_LIBRARY_PATH', _brew_lib)
     os.environ.setdefault('DYLD_FALLBACK_LIBRARY_PATH', _brew_lib)
+
+_nvm_node = os.path.expanduser('~/.nvm/versions/node/*/bin')
+_globbed = glob.glob(_nvm_node)
+if _globbed:
+    _node_bin = _globbed[-1]
+    os.environ['PATH'] = f"{_node_bin}:{os.environ.get('PATH', '')}"
+
+_bun_path = '/Users/ryon.sherman/.bun/bin/bun' if os.path.isfile('/Users/ryon.sherman/.bun/bin/bun') else ''
 
 import warnings
 warnings.filterwarnings('ignore', category=UserWarning,
@@ -169,6 +178,16 @@ def decode_qr_from_frame(frame):
     return []
 
 
+def fmt_dur(secs):
+    secs = int(secs)
+    h, m, s = secs // 3600, (secs % 3600) // 60, secs % 60
+    if h:
+        return f"{h}h{m}m{s}s"
+    if m:
+        return f"{m}m{s}s"
+    return f"{s}s"
+
+
 # ---------------------------------------------------------------------------
 # COMMAND: enc
 # ---------------------------------------------------------------------------
@@ -201,16 +220,6 @@ def part_path(base, num, total):
         return base
     root, ext = os.path.splitext(base)
     return f"{root}.part{num:02d}{ext}"
-
-
-def fmt_dur(secs):
-    secs = int(secs)
-    h, m, s = secs // 3600, (secs % 3600) // 60, secs % 60
-    if h:
-        return f"{h}h{m}m{s}s"
-    if m:
-        return f"{m}m{s}s"
-    return f"{s}s"
 
 
 def _render_frame(args):
@@ -440,17 +449,15 @@ def cmd_enc(args):
 def ensure_video_file(input_arg):
     if input_arg.startswith(('http://', 'https://', 'www.')):
         print(f"Downloading video from: {input_arg}")
-        import yt_dlp
         tmp = tempfile.mktemp(suffix='.mp4')
-        ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'merge_output_format': 'mp4',
-            'outtmpl': tmp,
-            'quiet': True,
-            'no_warnings': True,
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([input_arg])
+        subprocess.run([sys.executable, '-m', 'yt_dlp',
+                        '--remote-components', 'ejs:github',
+                        '--js-runtimes', f'bun:{_bun_path}',
+                        '--cookies-from-browser', 'firefox',
+                        '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                        '--merge-output-format', 'mp4',
+                        '-o', tmp, input_arg],
+                       capture_output=True, timeout=600)
         print(f"Downloaded to: {tmp}")
         return tmp
     return input_arg
