@@ -555,10 +555,12 @@ def decode_video(video_path, workers=None):
     t0 = time.time()
 
     if workers > 1 and remaining > 100:
-        chunk_size = max(1, remaining // workers)
+        print(f"  Decoding with {workers} workers...")
+        chunk_size = max(1, remaining // (workers * 3))
         ranges = [(video_path, i, min(i + chunk_size, total_frames))
                   for i in range(start_frame, total_frames, chunk_size)]
         done_ranges = 0
+        print(f"  Progress: ~0% (0 payloads)  [{fmt_dur(0)} elapsed, ETA {fmt_dur(0)}]")
         with ProcessPoolExecutor(max_workers=workers) as pool:
             futures = {pool.submit(_decode_frame_range, r): r for r in ranges}
             for fut in as_completed(futures):
