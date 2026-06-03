@@ -5,7 +5,7 @@ import subprocess, time, os, sys, tempfile, shutil
 PY = [sys.executable, '-u', os.path.join(os.path.dirname(__file__), 'qrvid.py')]
 
 
-def bench_local(data_size, configs, tmp):
+def bench_local(data_size, configs, tmp, extra_flags):
     rows = []
     for cfg in configs:
         label = cfg['label']
@@ -22,7 +22,8 @@ def bench_local(data_size, configs, tmp):
         t0 = time.time()
         r = subprocess.run(PY + ['enc', infile, '-o', outfile,
                             '--cols', str(cols), '--rows', str(rows_n),
-                            '--hold', '3', '--verify'],
+                            '--verify']
+                           + extra_flags,
                            capture_output=True, text=True, timeout=600)
         enc_t = time.time() - t0
         if r.returncode != 0:
@@ -86,6 +87,8 @@ def main():
     ap.add_argument('--youtube', help='YouTube URL to benchmark decode')
     ap.add_argument('--layouts', default='6x5,5x4,4x4,4x3,3x3,2x2',
                     help='Comma-separated grid layouts (default: all)')
+    ap.add_argument('extra', nargs=argparse.REMAINDER,
+                    help='Extra flags (after --) passed to qrvid.py enc')
     args = ap.parse_args()
 
     tmp = tempfile.mkdtemp(prefix='qrvid_bench_')
@@ -105,8 +108,10 @@ def main():
 
     if configs:
         data_size = args.size
-        print(f"\nLocal encode/decode benchmark ({data_size // 1024} KB):")
-        results = bench_local(data_size, configs, tmp)
+        extra = [x for x in args.extra if x != '--']
+        print(f"\nLocal encode/decode benchmark ({data_size // 1024} KB):"
+              f"{'  extra: ' + ' '.join(extra) if extra else ''}")
+        results = bench_local(data_size, configs, tmp, extra)
         print(f"\n  {'Layout':>8}  {'Video':>8}  {'Dur':>6}  "
               f"{'Chunks':>7}  {'Loss':>5}  {'Enc':>8}")
         print(f"  {'-'*8}  {'-'*8}  {'-'*6}  {'-'*7}  {'-'*5}  {'-'*8}")
