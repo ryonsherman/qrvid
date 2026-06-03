@@ -4,3 +4,5 @@
 .qrvid_frames/
 __pycache__/
 *.pyc
+testfile.txt
+testfile.txt.enc
