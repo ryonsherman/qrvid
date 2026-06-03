@@ -46,6 +46,9 @@ HEADER_FORMAT = '<4sBBHHHII'
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 COMPRESSED_FLAG = 1
 
+RECOVERY_BLOCKS = 5
+RECOVERY_BAUD = 14400
+
 QR_MAX_PAYLOAD = 1273
 MAX_CHUNK_DATA = 300
 
@@ -186,6 +189,104 @@ def fmt_dur(secs):
     if m:
         return f"{m}m{s}s"
     return f"{s}s"
+
+
+# ---------------------------------------------------------------------------
+# PAR2 recovery + audio helpers
+# ---------------------------------------------------------------------------
+
+def _create_par2(data, num_blocks):
+    tmp_data = tempfile.mktemp()
+    with open(tmp_data, 'wb') as f:
+        f.write(data)
+    subprocess.run(['par2', 'create', '-c' + str(num_blocks), '-m512',
+                    tmp_data, tmp_data],
+                   capture_output=True, timeout=120)
+    parts = sorted(glob.glob(tmp_data + '.par2') + glob.glob(tmp_data + '.vol*'))
+    par2_bytes = b''
+    for p in parts:
+        with open(p, 'rb') as f:
+            par2_bytes += f.read()
+        os.unlink(p)
+    os.unlink(tmp_data)
+    return par2_bytes
+
+
+def _repair_with_par2(data, par2_bytes):
+    tmp_data = tempfile.mktemp()
+    tmp_par2 = tempfile.mktemp(suffix='.par2')
+    with open(tmp_data, 'wb') as f:
+        f.write(data)
+    with open(tmp_par2, 'wb') as f:
+        f.write(par2_bytes)
+    r = subprocess.run(['par2', 'repair', tmp_par2, tmp_data],
+                       capture_output=True, timeout=120)
+    os.unlink(tmp_par2)
+    if r.returncode == 0:
+        with open(tmp_data, 'rb') as f:
+            repaired = f.read()
+        os.unlink(tmp_data)
+        return repaired
+    os.unlink(tmp_data)
+    return data  # repair not possible, return original
+
+
+def _modem_tx(data, baud):
+    import base64
+    b64 = base64.b64encode(data).decode()
+    tmp_wav = tempfile.mktemp(suffix='.wav')
+    p = subprocess.Popen(['minimodem', '--tx', str(baud), '-f', tmp_wav],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE)
+    p.communicate(input=b64.encode(), timeout=300)
+    with open(tmp_wav, 'rb') as f:
+        wav = f.read()
+    os.unlink(tmp_wav)
+    return wav
+
+
+def _modem_rx(wav_bytes, baud):
+    import base64
+    tmp_wav = tempfile.mktemp(suffix='.wav')
+    with open(tmp_wav, 'wb') as f:
+        f.write(wav_bytes)
+    p = subprocess.Popen(['minimodem', '--rx', str(baud), '-f', tmp_wav, '-q'],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, _ = p.communicate(timeout=300)
+    os.unlink(tmp_wav)
+    try:
+        return base64.b64decode(out.strip())
+    except Exception:
+        return b''
+
+
+def _add_audio_to_video(video_path, audio_wav, output_path):
+    import shutil
+    tmp_wav = tempfile.mktemp(suffix='.wav')
+    tmp_out = tempfile.mktemp(suffix='.mp4')
+    with open(tmp_wav, 'wb') as f:
+        f.write(audio_wav)
+    subprocess.run(['ffmpeg', '-y', '-i', video_path, '-i', tmp_wav,
+                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k',
+                    '-map', '0:v:0', '-map', '1:a:0',
+                    '-shortest', tmp_out],
+                   capture_output=True, timeout=120)
+    os.unlink(tmp_wav)
+    shutil.move(tmp_out, output_path)
+
+
+def _extract_audio(video_path):
+    tmp_wav = tempfile.mktemp(suffix='.wav')
+    r = subprocess.run(['ffmpeg', '-y', '-i', video_path, '-vn',
+                        '-acodec', 'pcm_s16le', '-ar', '44100', '-ac', '1',
+                        tmp_wav],
+                       capture_output=True, timeout=120)
+    if r.returncode != 0:
+        return b''
+    with open(tmp_wav, 'rb') as f:
+        wav = f.read()
+    os.unlink(tmp_wav)
+    return wav
 
 
 # ---------------------------------------------------------------------------
@@ -424,10 +525,17 @@ def cmd_enc(args):
     encode_video(chunks, args.output, args.fps, args.hold, args.gap, box,
                  cols, rows, vw, vh, workers=workers)
 
+    if args.recovery:
+        print(f"  Generating {args.recovery} PAR2 recovery blocks...")
+        par2_data = _create_par2(data_to_chunk, args.recovery)
+        mod_data = _modem_tx(par2_data, RECOVERY_BAUD)
+        print(f"  Recovery audio: {len(mod_data)} bytes")
+        _add_audio_to_video(args.output, mod_data, args.output)
+
     if args.verify:
         print(f"\n  Verifying {args.output}...")
         try:
-            v_data, v_flags = decode_video(args.output, workers=workers)
+            v_data, v_flags, _ = decode_video(args.output, workers=workers)
             if args.password:
                 v_data = decrypt_data(v_data, args.password)
             if v_flags & COMPRESSED_FLAG:
@@ -627,11 +735,18 @@ def decode_video(video_path, workers=None):
     expected_crc = sample['crc']
     flags = sample.get('flags', 0)
 
+    missing = 0
     if len(chunks) != total:
-        missing = sorted(set(range(total)) - set(chunks.keys()))
-        print(f"  Found {len(chunks)}/{total} chunks")
-        raise RuntimeError(f"Missing {len(missing)} chunks: "
-                           f"{missing[:20]}{'...' if len(missing) > 20 else ''}")
+        missing_list = sorted(set(range(total)) - set(chunks.keys()))
+        missing = len(missing_list)
+        print(f"  Found {len(chunks)}/{total} chunks ({missing} missing)")
+        reconstructed = bytearray(total_data_len)
+        for ch in chunks.values():
+            pos = ch['chunk_index'] * MAX_CHUNK_DATA
+            reconstructed[pos:pos + len(ch['data'])] = ch['data']
+        data = bytes(reconstructed[:total_data_len])
+        print(f"  Partial data: {len(data)} bytes")
+        return data, flags, missing
 
     ordered = [chunks[i] for i in range(total)]
     for ch in ordered:
@@ -647,7 +762,7 @@ def decode_video(video_path, workers=None):
             f"CRC32 mismatch: expected {expected_crc:08x}, got {actual_crc:08x}")
 
     print(f"  Reconstructed: {len(data)} bytes (CRC32: {expected_crc:08x} ✓)")
-    return data, flags
+    return data, flags, 0
 
 
 def cmd_dec(args):
@@ -672,16 +787,26 @@ def cmd_dec(args):
     data_flags = 0
     workers = args.workers if args.workers is not None else max(1, multiprocessing.cpu_count() - 1)
 
+    par2_data = b''
     for fi, f in enumerate(files):
         if len(files) > 1:
             print(f"[{fi + 1}/{len(files)}]", end="")
-        segment, seg_flags = decode_video(f, workers=workers)
+        segment, seg_flags, seg_missing = decode_video(f, workers=workers)
         all_data += segment
         data_flags |= seg_flags
+
+        if seg_missing > 0:
+            audio_wav = _extract_audio(f)
+            if audio_wav:
+                par2_data = _modem_rx(audio_wav, RECOVERY_BAUD)
 
     for tf in temp_files:
         if os.path.exists(tf):
             os.unlink(tf)
+
+    if par2_data:
+        print(f"Repairing with PAR2 ({len(par2_data)} bytes)...")
+        all_data = _repair_with_par2(all_data, par2_data)
 
     if args.password:
         print(f"\nDecrypting ({len(all_data)} bytes)...")
@@ -739,6 +864,8 @@ def parse_args():
                      help='Verify output by decoding after encode')
     enc.add_argument('--compress', action='store_true',
                      help='Gzip compress data before encoding')
+    enc.add_argument('--recovery', type=int, default=0, metavar='N',
+                     help='Generate N PAR2 recovery blocks (sent via audio track)')
     dec = sub.add_parser('dec', help='Decode QR video back to file')
     dec.add_argument('input', nargs='+',
                      help='Video file path(s), glob, directory, or YouTube URL(s)')
