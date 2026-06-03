@@ -46,8 +46,8 @@ HEADER_FORMAT = '<4sBBHHHII'
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 COMPRESSED_FLAG = 1
 
-RECOVERY_BLOCKS = 5
-RECOVERY_BAUD = 14400
+RECOVERY_BLOCKS = 3
+RECOVERY_BAUD = 4800
 
 QR_MAX_PAYLOAD = 1273
 MAX_CHUNK_DATA = 300
@@ -556,7 +556,14 @@ def cmd_enc(args):
     if args.verify:
         print(f"\n  Verifying {args.output}...")
         try:
-            v_data, v_flags, _ = decode_video(args.output, workers=workers)
+            v_data, v_flags, v_missing = decode_video(args.output, workers=workers)
+            if v_missing > 0 and args.recovery:
+                audio_wav = _extract_audio(args.output)
+                if audio_wav:
+                    par2_data = _modem_rx(audio_wav, RECOVERY_BAUD)
+                    if par2_data:
+                        print(f"  Repairing with PAR2 ({fmt_size(len(par2_data))})...")
+                        v_data = _repair_with_par2(v_data, par2_data)
             if args.password:
                 v_data = decrypt_data(v_data, args.password)
             if v_flags & COMPRESSED_FLAG:
