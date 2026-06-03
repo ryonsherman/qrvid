@@ -520,8 +520,9 @@ def decode_video(video_path, workers=None):
     fps = cap.get(cv2.CAP_PROP_FPS)
     cap.release()
 
+    dur = total_frames / fps
     print(f"\nVideo: {video_path}")
-    print(f"Frames: {total_frames}, FPS: {fps:.2f}")
+    print(f"Video: {total_frames} frames, {dur:.1f}s @ {fps:.0f} FPS")
 
     if workers is None:
         workers = max(1, multiprocessing.cpu_count() - 1)

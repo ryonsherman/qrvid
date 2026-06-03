@@ -6,3 +6,4 @@ __pycache__/
 *.pyc
 testfile.txt
 testfile.txt.enc
+.TODO.md
