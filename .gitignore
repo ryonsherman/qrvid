@@ -6,4 +6,5 @@ __pycache__/
 *.pyc
 testfile.txt
 testfile.txt.enc
+*.jpg
 .TODO.md
