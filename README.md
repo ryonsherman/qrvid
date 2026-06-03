@@ -88,39 +88,68 @@ python qrvid.py dec myfile.mp4 > restored.bin
 | `--hold` | 3 | Frames to display each QR layout |
 | `--gap` | 0 | White separator frames between layouts |
 | `--box-size` | 8 | QR module size in pixels |
-| `--qpf` / `--qr-per-frame` | 2 | QR codes per frame |
+| `--cols` | 6 | QR code columns per frame |
+| `--rows` | 5 | QR code rows per frame |
+| `--max-duration` | — | Split output into segments of this many min each |
+| `--workers` | cpu−1 | Parallel workers for frame generation |
+| `--compress` | — | Gzip data before encoding |
+| `--verify` | — | Decode output after encoding to check integrity |
 | `-p` / `--password` | — | Encrypt with this password |
+
+## Benchmarking
+
+The `benchmark.py` script tests grid layouts for data loss and speed:
+
+```bash
+# All layouts with default 1 MB file
+python benchmark.py
+
+# Specific size and layouts
+python benchmark.py --size 100K --layouts 6x5,5x4,4x4
+
+# Test with extra qrvid.py flags (use -- separator)
+python benchmark.py --size 1M --layouts 6x5,5x4 -- --compress --hold 1
+
+# Test YouTube re-encode (after uploading):
+python benchmark.py --youtube "https://youtu.be/..."
+```
+
+Output columns: Layout, Video (bytes), Duration, Chunks, Loss (missing),
+Encode time.
 
 ## Capacity
 
-With defaults (2 QPF, 3 hold at 30 fps, ~480 bytes/chunk):
+With defaults (6×5 = 30 QPF, 3 hold at 30 fps, 480 bytes/chunk):
 
 | Duration | Frames | QRs | Raw data | Encrypted |
 |---------|-------|-----|---------|-----------|
-| 10 min | 18,000 | 36,000 | ~16 MB | ~16 MB |
-| 1 hour | 108,000 | 216,000 | ~98 MB | ~98 MB |
-| 12 hours | 1,296,000 | 2,592,000 | ~1.1 GB | ~1.1 GB |
+| 30 min | 54,000 | 1,620,000 | ~740 MB | ~740 MB |
+| 1 hour | 108,000 | 3,240,000 | ~1.4 GB | ~1.4 GB |
+| 12 hours | 1,296,000 | 38,880,000 | ~17 GB | ~17 GB |
 
-Tune `--hold`, `--qpf`, and `--box-size` to trade density for readability
-(denser = more data but more sensitive to video compression artifacts).
+Tune `--cols`, `--rows`, `--hold`, and `--box-size` to trade density for
+readability (denser = more data but more sensitive to compression artifacts).
+Use `--compress` to shrink data before encoding. Use `--verify` to check
+layout reliability for your specific file.
 
 ## Format
 
-Header (19 bytes, little-endian):
+Header (20 bytes, little-endian):
 
 ```
 Offset  Size  Field
  0       4     MAGIC          "QRVD"
- 4       1     format_version  1
- 5       2     total_chunks
- 7       2     chunk_index
- 9       2     chunk_len      bytes of data in this chunk
-11       4     total_len      original data length
-15       4     crc32          CRC-32 of original data
+ 4       1     format_version  2
+ 5       1     flags          Bit 0: gzip compressed
+ 6       2     total_chunks
+ 8       2     chunk_index
+10       2     chunk_len      bytes of data in this chunk
+12       4     total_len      original data length
+16       4     crc32          CRC-32 of data (pre-encryption)
 ```
 
-Each chunk payload = header (19) + data (max 480). Chunks are padded by
-repeating the last to align with `qpf`.
+Each chunk payload = header (20) + data (max 480). Chunks are padded by
+repeating the last to align with `cols × rows`.
 
 ## Project files
 
