@@ -210,7 +210,7 @@ def _render_frame(args):
 
 
 def encode_video(chunks, output_path, fps, hold, gap, box, cols, rows,
-                 vw=1920, vh=1080):
+                 vw=1920, vh=1080, workers=None):
     qpf = cols * rows
     pad = (qpf - len(chunks) % qpf) % qpf
     for _ in range(pad):
@@ -226,10 +226,23 @@ def encode_video(chunks, output_path, fps, hold, gap, box, cols, rows,
     tmp_dir = output_path + '.qrvid_frames'
     os.makedirs(tmp_dir, exist_ok=True)
 
-    print(f"  Generating frames ({frames_needed} layouts, "
-          f"{multiprocessing.cpu_count()} workers)...")
+    if workers is None:
+        workers = max(1, multiprocessing.cpu_count() - 1)
+
+    # Validate existing PNGs (stale files from aborted runs)
+    for fi in range(frames_needed):
+        frame_path = os.path.join(tmp_dir, f'{fi:06d}.png')
+        if os.path.exists(frame_path):
+            img = cv2.imread(frame_path)
+            if img is None or img.shape != (vh, vw, 3):
+                os.unlink(frame_path)
+
+    existing = sum(1 for fi in range(frames_needed)
+                   if os.path.exists(os.path.join(tmp_dir, f'{fi:06d}.png')))
+
+    print(f"  Generating frames ({frames_needed} layouts, {workers} workers)...")
     pending = []
-    with ProcessPoolExecutor(max_workers=multiprocessing.cpu_count()) as pool:
+    with ProcessPoolExecutor(max_workers=workers) as pool:
         for fi in range(frames_needed):
             frame_path = os.path.join(tmp_dir, f'{fi:06d}.png')
             if os.path.exists(frame_path):
@@ -241,17 +254,18 @@ def encode_video(chunks, output_path, fps, hold, gap, box, cols, rows,
                 (chunk_slice, qpf, cols, rows, box, vw, vh, frame_path),
             ))
 
-        done_count = 0
+        done_count = existing
         t0 = time.time()
-        last_print = 0
+        last_print = existing
         for fut in as_completed(pending):
             fut.result()
             done_count += 1
-            if done_count - last_print >= 10 or done_count == len(pending):
+            if done_count - last_print >= 10 or done_count == frames_needed:
                 last_print = done_count
                 elapsed = time.time() - t0
-                rate = done_count / elapsed if elapsed > 0 else 0
-                remaining = len(pending) - done_count
+                completed = done_count - existing
+                rate = completed / elapsed if elapsed > 0 else 0
+                remaining = len(pending) - completed
                 eta = remaining / rate if rate > 0 else 0
                 print(f"    Frame {done_count}/{frames_needed}  "
                       f"[{fmt_dur(elapsed)} elapsed, ETA {fmt_dur(eta)}]")
@@ -341,6 +355,8 @@ def cmd_enc(args):
     max_mod = max(make_qr_image(b'\0' * HEADER_SIZE, box).shape[:2])
     print(f"Max QR dimension: {max_mod}px")
 
+    workers = args.workers if args.workers is not None else max(1, multiprocessing.cpu_count() - 1)
+
     if args.max_duration:
         max_sec = args.max_duration * 60
         if max_sec < YT_MIN_SECONDS:
@@ -366,14 +382,15 @@ def cmd_enc(args):
                 print(f"\nPart {pi + 1}/{nparts} ({len(segment)} bytes, "
                       f"{len(part_chunks)} chunks)")
                 encode_video(part_chunks, out_path, args.fps, args.hold,
-                             args.gap, box, cols, rows, vw, vh)
+                             args.gap, box, cols, rows, vw, vh,
+                             workers=workers)
             print(f"\nAll {nparts} files saved.")
             return
         print(f"Fits within {args.max_duration} min — single file")
 
     chunks = build_chunks(data_to_chunk)
     encode_video(chunks, args.output, args.fps, args.hold, args.gap, box,
-                 cols, rows, vw, vh)
+                 cols, rows, vw, vh, workers=workers)
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +623,9 @@ def parse_args():
                      help='QR code rows per frame (default 5)')
     enc.add_argument('--max-duration', type=float, default=None,
                      help='Split output into segments of this many minutes each')
+    enc.add_argument('--workers', type=int, default=None,
+                     help='Parallel workers for frame generation '
+                          '(default: cpu_count - 1)')
     dec = sub.add_parser('dec', help='Decode QR video back to file')
     dec.add_argument('input', nargs='+',
                      help='Video file path(s), glob, directory, or YouTube URL(s)')
