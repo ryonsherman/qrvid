@@ -1,0 +1,2 @@
+brew "zbar"
+brew "ffmpeg"
