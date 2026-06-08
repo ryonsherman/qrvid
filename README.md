@@ -163,6 +163,13 @@ Offset  Size  Field
 Each chunk payload = header (20) + data (max 300). Chunks are padded by
 repeating the last to align with `cols × rows`.
 
+## Disclaimer
+
+This is a personal project for **educational purposes only**. It was not
+intended to violate YouTube's Terms of Service or any other platform's
+policies. Users are responsible for ensuring their use complies with all
+applicable terms and laws.
+
 ## Project files
 
 - `qrvid.py` — single-file CLI tool (subcommands: `enc`, `dec`)
