@@ -7,48 +7,46 @@ decode it back from a downloaded video.
 
 ## How it works
 
-1. **Chunking** — input data is split into chunks (default 300 bytes each).
-   Every chunk gets a 20-byte header (magic, version, flags, total chunks,
-   index, chunk length, total data length, CRC32).
+1. **Chunking** — input data is split into 300-byte chunks. Each chunk gets a
+   20-byte header: magic, version, flags, total chunks, index, chunk length,
+   total data length, CRC32.
 2. **Optional compression** — gzip level 9 (`--compress`).
-3. **Optional encryption** — AES-256-GCM with PBKDF2 key derivation.
+3. **Optional encryption** — AES-256-GCM with PBKDF2 key derivation
+   (`--password`).
 4. **QR encoding** — each chunk is rendered as a QR code (error correction H /
-   30%). Multiple QRs are laid out on a 1920×1080 H.264 video frame in a
-   `cols`×`rows` grid (default 6×5 = 30 QRs/frame).
+   30%). QRs are laid out on a 1920×1080 H.264 video frame in a `cols`×`rows`
+   grid (default 4×3 = 12 QRs/frame).
 5. **Parallel frame generation** — frames are rendered in parallel using a
    process pool (`--workers`).
-6. **Optional PAR2 recovery** — recovery blocks are generated from the
-   (compressed+encrypted) data and transmitted as FSK audio in the video's
-   audio track using `minimodem` (`--recovery N`).
+6. **Optional chunk duplication** — each chunk can be encoded multiple times at
+   different positions in the video (`--recovery N`). Since the decoder
+   deduplicates by payload hash, a chunk only needs one copy to survive.
 7. **Video assembly** — layouts are written sequentially, each held for N
-   frames (default 3 @ 30 fps ≈ 0.1 s). YouTube minimum duration is enforced
-   with trailing black frames.
-8. **Decoding** — audio is extracted and demodulated for PAR2 recovery blocks.
-   The video is scanned in parallel; QRs are detected with `pyzbar` (falling
-   back to OpenCV). Duplicate payloads are discarded by hash.
-9. **PAR2 repair** — if chunks are missing, the audio-recovered PAR2 blocks
-   automatically repair them.
-10. **Reconstruction** — chunks are re-ordered by index, data is concatenated,
-    optionally decrypted, optionally decompressed, and CRC32 is verified.
+   frames (default 3 @ 30 fps). YouTube's 33-second minimum duration is
+   enforced with trailing black frames.
+8. **Decoding** — the video is scanned in parallel; QRs are detected with
+   `pyzbar` (falling back to OpenCV). Duplicate payloads are discarded by hash.
+9. **Reconstruction** — chunks are re-ordered by index, data is concatenated,
+   optionally decrypted, optionally decompressed, and CRC32 is verified.
+10. **YouTube download** — videos are downloaded via `yt-dlp` with Firefox
+    cookies and bun JS runtime for YouTube's bot challenge.
 
 ## Requirements
 
 - Python 3.8+
 - [zbar](https://github.com/mchehab/zbar) shared library (for pyzbar)
-- [par2cmdline](https://github.com/Parchive/par2cmdline) (for PAR2 recovery)
-- [minimodem](https://github.com/kamalmostafa/minimodem) (for audio recovery channel)
-- ffmpeg (for audio merging)
+- bun (for YouTube JS challenge solving)
 
 ### macOS (Homebrew)
 
 ```bash
-brew bundle
+brew install zbar
 ```
 
 ### Linux (apt)
 
 ```bash
-sudo apt install libzbar0 par2 minimodem ffmpeg
+sudo apt install libzbar0
 ```
 
 ### Windows
@@ -72,8 +70,9 @@ python qrvid.py enc myfile.bin -o myfile.mp4
 # Encrypt with a password (AES-256-GCM + PBKDF2)
 python qrvid.py enc myfile.bin -o myfile.mp4 --password "hunter2"
 
-# More QRs per frame, longer hold time
-python qrvid.py enc myfile.bin -o myfile.mp4 --qpf 4 --hold 6
+# Compress + encrypt + duplicate for YouTube reliability
+python qrvid.py enc myfile.bin -o myfile.mp4 --compress --password "hunter2" \
+  --cols 4 --rows 3 --recovery 1
 
 # Pipe data via stdin
 cat myfile.bin | python qrvid.py enc - -o myfile.mp4
@@ -89,7 +88,7 @@ python qrvid.py dec myfile.mp4 -o restored.bin
 python qrvid.py dec myfile.mp4 -o restored.bin --password "hunter2"
 
 # Decode from a YouTube URL (downloads first)
-python qrvid.py dec "https://youtu.be/..." -o restored.bin
+python qrvid.py dec "https://youtu.be/..." -o restored.bin --password "hunter2"
 
 # Decode to stdout
 python qrvid.py dec myfile.mp4 > restored.bin
@@ -109,7 +108,7 @@ python qrvid.py dec myfile.mp4 > restored.bin
 | `--workers` | cpu−1 | Parallel workers for frame generation |
 | `--compress` | — | Gzip data before encoding |
 | `--verify` | — | Decode output after encoding to check integrity |
-| `--recovery` | 0 | Generate N PAR2 recovery blocks (transmitted via audio) |
+| `--recovery` | 0 | Duplicate each chunk N extra times (loss recovery) |
 | `-p` / `--password` | — | Encrypt with this password |
 
 ## Benchmarking
@@ -125,9 +124,6 @@ python benchmark.py --size 100K --layouts 6x5,5x4,4x4
 
 # Test with extra qrvid.py flags (use -- separator)
 python benchmark.py --size 1M --layouts 6x5,5x4 -- --compress --hold 1
-
-# Test YouTube re-encode (after uploading):
-python benchmark.py --youtube "https://youtu.be/..."
 ```
 
 Output columns: Layout, Video (bytes), Duration, Chunks, Loss (missing),
@@ -135,18 +131,18 @@ Encode time.
 
 ## Capacity
 
-With defaults (6×5 = 30 QPF, 3 hold at 30 fps, 480 bytes/chunk):
+With defaults (4×3 = 12 QPF, 3 hold at 30 fps, 300 bytes/chunk, compressed):
 
 | Duration | Frames | QRs | Raw data | Encrypted |
 |---------|-------|-----|---------|-----------|
-| 30 min | 54,000 | 1,620,000 | ~740 MB | ~740 MB |
-| 1 hour | 108,000 | 3,240,000 | ~1.4 GB | ~1.4 GB |
-| 12 hours | 1,296,000 | 38,880,000 | ~17 GB | ~17 GB |
+| 4 min | 7,200 | 86,400 | ~22 MB | ~22 MB |
+| 15 min | 27,000 | 324,000 | ~82 MB | ~82 MB |
+| 12 hours | 1,296,000 | 15,552,000 | ~3.9 GB | ~3.9 GB |
 
 Tune `--cols`, `--rows`, `--hold`, and `--box-size` to trade density for
-readability (denser = more data but more sensitive to compression artifacts).
-Use `--compress` to shrink data before encoding. Use `--verify` to check
-layout reliability for your specific file.
+readability. Use `--compress` to shrink data before encoding. Use `--verify`
+to check layout reliability for your specific file. Use `--recovery` to
+duplicate chunks for extra loss protection.
 
 ## Format
 
@@ -164,11 +160,14 @@ Offset  Size  Field
 16       4     crc32          CRC-32 of data (pre-encryption)
 ```
 
-Each chunk payload = header (20) + data (max 480). Chunks are padded by
+Each chunk payload = header (20) + data (max 300). Chunks are padded by
 repeating the last to align with `cols × rows`.
 
 ## Project files
 
 - `qrvid.py` — single-file CLI tool (subcommands: `enc`, `dec`)
 - `requirements.txt` — Python dependencies
-- `test_data.bin` — 5 KB random data for round-trip testing
+- `benchmark.py` — grid layout benchmark script
+- `preview.gif` — animated preview of encoded QR grid
+- `testdata/file_example_MP4_1920_18MG.mp4` — 18 MB test video
+- `.context.md` — agent context / gotchas summary
