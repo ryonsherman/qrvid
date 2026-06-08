@@ -3,7 +3,7 @@
 Encode arbitrary binary data into QR code videos for YouTube storage, and
 decode it back from a downloaded video.
 
-![QR code video preview](preview.gif)
+![QR code video preview](screenshots/preview.gif)
 
 ## How it works
 
