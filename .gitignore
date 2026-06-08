@@ -10,3 +10,4 @@ testfile.txt.enc
 *.jpg
 .TODO.md
 opencode.sh
+crypt.sh
